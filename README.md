@@ -35,22 +35,5 @@ Open the gear button for sound, volume, vibration, frame-rate cap (Auto/30/60/90
 
 Game speed and animation are independent of frame rate. The Android app asks the phone for its highest refresh rate, so it can run at 90 or 120 fps on screens that support it.
 
-## How it's built
-The game is a single `index.html` with no dependencies. [Capacitor](https://capacitorjs.com) wraps it as an Android app.
-
-`.github/workflows/build.yml` does two things on every push to `main`:
-1. Builds `dino-run.apk` (Actions → latest run → Artifacts). Pushing a tag like `v1.0` also attaches it to a GitHub Release.
-2. Deploys the website to GitHub Pages. Set Settings → Pages → Source to "GitHub Actions" once.
-
-You can build everything from a phone: edit files in the GitHub web editor, then run the workflow from the Actions tab.
-
-## Project files
-| File | Purpose |
-|---|---|
-| `index.html` | The whole game |
-| `sw.js` | Offline support (bump `CACHE` when you change the game) |
-| `manifest.webmanifest`, `icon-*.png` | PWA manifest and icons |
-| `package.json`, `capacitor.config.json` | Android wrapper config |
-
 ## Saved data
 Hi-score, coins, skins and settings are stored locally on the device. Nothing is sent anywhere.
