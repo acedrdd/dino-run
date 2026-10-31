@@ -1,9 +1,11 @@
-name: Build (Website + Android APK)
+# Place at: .github/workflows/build.yml
+name: Build Dino Run
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -18,6 +20,7 @@ concurrency:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -25,152 +28,108 @@ jobs:
         with:
           node-version: 20
 
+      # Capacitor 6 = Java 17 + Gradle 8.2 (stable, no JDK 21 surprises)
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Copy web files into www/
+      # v2.0 zip shipped package.json and sw.js as EMPTY (0 byte) files,
+      # which breaks npm and the offline cache. Recreate them if empty.
+      - name: Repair empty package.json / sw.js
         run: |
-          mkdir -p www
-          cp index.html sw.js manifest.webmanifest icon-192.png icon-512.png www/
-
-      - name: Add Android platform
-        run: npx cap add android
-
-      - name: Prepare icon source
-        run: |
-          mkdir -p assets
-          cp icon-1024.png assets/icon.png
-
-      - name: Generate launcher icons
-        run: npx capacitor-assets generate --android --iconBackgroundColor '#0a1128' --iconBackgroundColorDark '#0a1128'
-
-      - name: Fullscreen theme + vibration permission
-        run: |
-          python3 - <<'PY'
-          import re, pathlib
-          p = pathlib.Path("android/app/src/main/res/values/styles.xml")
-          s = p.read_text()
-          extra = """
-              <item name="android:windowFullscreen">true</item>
-              <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>"""
-          s = re.sub(r'(<style name="AppTheme\.NoActionBar"[^>]*>)', r'\1' + extra, s, count=1)
-          p.write_text(s)
-          m = pathlib.Path("android/app/src/main/AndroidManifest.xml")
-          t = m.read_text()
-          if "android.permission.VIBRATE" not in t:
-              t = t.replace("</manifest>", '    <uses-permission android:name="android.permission.VIBRATE" />\n</manifest>')
-          m.write_text(t)
-          PY
-
-      - name: Enable 90/120 Hz, immersive mode and keep-screen-on
-        run: |
-          f=$(find android/app/src/main/java -name MainActivity.java | head -1)
-          pkg=$(grep -m1 '^package' "$f")
-          cat > /tmp/body.java <<'JAVA'
-
-          import android.os.Build;
-          import android.os.Bundle;
-          import android.view.Display;
-          import android.view.View;
-          import android.view.WindowManager;
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-            @Override
-            public void onCreate(Bundle savedInstanceState) {
-              super.onCreate(savedInstanceState);
-              getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-              requestHighRefreshRate();
-              hideSystemBars();
-            }
-
-            @Override
-            public void onResume() {
-              super.onResume();
-              requestHighRefreshRate();
-            }
-
-            @Override
-            public void onWindowFocusChanged(boolean hasFocus) {
-              super.onWindowFocusChanged(hasFocus);
-              if (hasFocus) hideSystemBars();
-            }
-
-            private void hideSystemBars() {
-              try {
-                getWindow().getDecorView().setSystemUiVisibility(
-                  View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    | View.SYSTEM_UI_FLAG_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-              } catch (Throwable ignored) {}
-            }
-
-            // Ask Android for the highest refresh rate the screen supports at its current resolution.
-            private void requestHighRefreshRate() {
-              try {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-                Display display = getWindowManager().getDefaultDisplay();
-                Display.Mode current = display.getMode();
-                Display.Mode best = current;
-                for (Display.Mode m : display.getSupportedModes()) {
-                  if (m.getPhysicalWidth() == current.getPhysicalWidth()
-                      && m.getPhysicalHeight() == current.getPhysicalHeight()
-                      && m.getRefreshRate() > best.getRefreshRate()) {
-                    best = m;
-                  }
-                }
-                WindowManager.LayoutParams p = getWindow().getAttributes();
-                p.preferredDisplayModeId = best.getModeId();
-                p.preferredRefreshRate = best.getRefreshRate();
-                getWindow().setAttributes(p);
-              } catch (Throwable ignored) {}
+          if [ ! -s package.json ]; then
+            echo "package.json missing/empty - regenerating"
+            cat > package.json <<'JSON'
+          {
+            "name": "dino-run",
+            "version": "2.0.0",
+            "private": true,
+            "description": "Endless dino runner",
+            "dependencies": {
+              "@capacitor/android": "^6.2.0",
+              "@capacitor/cli": "^6.2.0",
+              "@capacitor/core": "^6.2.0"
             }
           }
-          JAVA
-          { echo "$pkg"; cat /tmp/body.java; } > "$f"
-          cat "$f" | head -20
+          JSON
+          fi
+          if [ ! -s sw.js ]; then
+            echo "sw.js missing/empty - regenerating"
+            cat > sw.js <<'JS'
+          const CACHE = 'dino-run-v10';
+          const ASSETS = ['./', './index.html', './manifest.webmanifest',
+            './icon-192.png', './icon-512.png'];
+          self.addEventListener('install', e => {
+            e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+            self.skipWaiting();
+          });
+          self.addEventListener('activate', e => {
+            e.waitUntil(caches.keys().then(keys =>
+              Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))));
+            self.clients.claim();
+          });
+          self.addEventListener('fetch', e => {
+            if (e.request.method !== 'GET') return;
+            e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+          });
+          JS
+          fi
+          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
 
-      - name: Sync web files
-        run: npx cap sync android
+      - name: Prepare www folder
+        run: |
+          rm -rf www && mkdir www
+          cp index.html sw.js manifest.webmanifest icon-*.png www/
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Add Android platform
+        run: |
+          rm -rf android
+          npx cap add android
+          npx cap sync android
 
       - name: Build debug APK
         working-directory: android
-        run: ./gradlew assembleDebug --no-daemon
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk dino-run.apk
+      - name: Collect APK
+        run: |
+          APK=$(find android/app/build/outputs/apk -name '*debug*.apk' | head -n1)
+          test -n "$APK"
+          cp "$APK" dino-run.apk
+          ls -lh dino-run.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: dino-run-apk
           path: dino-run.apk
+          if-no-files-found: error
 
-      - name: Attach APK to GitHub Release (tags only)
+      - name: Publish release (v* tags)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dino-run.apk
 
   pages:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
+    continue-on-error: true   # don't turn the run red if Pages isn't enabled
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Collect site files
+      - name: Stage site
         run: |
           mkdir site
-          cp index.html sw.js manifest.webmanifest icon-192.png icon-512.png site/
+          cp index.html manifest.webmanifest icon-*.png site/
+          if [ -s sw.js ]; then cp sw.js site/; fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
